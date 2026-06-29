@@ -6,7 +6,6 @@ st.set_page_config(page_title="TrueScore: Google Maps Filter", layout="wide", pa
 
 # --- 1. SIDEBAR CONFIGURATION ---
 st.sidebar.header("⚙️ Algorithm Weights")
-st.sidebar.markdown("Tweak how much influence different review traits have on the final score.")
 
 st.sidebar.subheader("1. Authority (Local Guide Level)")
 w_level_0 = st.sidebar.slider("Level 0 (No Level)", 0.0, 2.0, 1.0, 0.1)
@@ -25,20 +24,21 @@ w_recent = st.sidebar.slider("< 1 Year Old", 0.5, 2.0, 1.2, 0.1)
 w_mid = st.sidebar.slider("1-3 Years Old", 0.5, 2.0, 1.0, 0.1)
 w_old = st.sidebar.slider("> 3 Years Old", 0.0, 1.0, 0.5, 0.1)
 
-st.sidebar.subheader("4. Advanced")
-apply_smoothing = st.sidebar.checkbox("Apply Bayesian Smoothing", value=True, help="Pulls restaurants with very few reviews toward the average so they don't unfairly dominate.")
+st.sidebar.subheader("🚨 4. Anti-Fraud Penalties")
+st.sidebar.markdown("Actively subtracts stars from places that buy fake reviews.")
+w_bot_penalty = st.sidebar.slider("Ghost Account Penalty", 0.0, 3.0, 1.5, 0.1, help="Max stars to subtract if reviews are overwhelmingly from ghost accounts (< 4 lifetime reviews).")
+w_one_star = st.sidebar.slider("Tourist Trap Penalty (1-Star %)", 0.0, 3.0, 1.0, 0.1, help="Max stars to subtract if the restaurant has a high ratio of 1-star reviews.")
+
+st.sidebar.subheader("5. Advanced")
+apply_smoothing = st.sidebar.checkbox("Apply Bayesian Smoothing", value=True)
 
 # --- 2. DATA PROCESSING FUNCTION ---
 @st.cache_data
 def calculate_true_scores(df, weights, apply_smoothing):
     df = df.copy()
-    
-    # Standardize column names (lowercase, replace spaces)
     df.columns = df.columns.str.lower().str.replace(' ', '_')
     
-    # --- FIXED Outscraper Compatibility Formatting ---
-    # Outscraper includes BOTH "rating" (restaurant avg) and "review_rating" (user's score).
-    # We must drop the place average first so we don't create duplicate column names!
+    # --- Outscraper Compatibility Formatting ---
     if 'review_rating' in df.columns:
         if 'rating' in df.columns:
             df = df.drop(columns=['rating'])
@@ -50,53 +50,51 @@ def calculate_true_scores(df, weights, apply_smoothing):
     if 'review_datetime_utc' in df.columns and 'date' not in df.columns: 
         df.rename(columns={'review_datetime_utc': 'date'}, inplace=True)
         
-    # Extract Local Guide Level from Outscraper's author_title column safely
     if 'author_title' in df.columns and 'local_guide_level' not in df.columns:
         df['local_guide_level'] = df['author_title'].astype(str).str.extract(r'Level (\d+)', expand=False).fillna(0)
         
-    # Convert Outscraper image URLs into True/False for the photo bonus
     if 'review_img_url' in df.columns and 'has_photo' not in df.columns:
         df['has_photo'] = df['review_img_url'].notna() & (df['review_img_url'].astype(str).str.strip() != '')
+        
+    # NEW: Find Author Review Count for Bot Defense
+    if 'author_reviews_count' not in df.columns:
+        rev_cols = [c for c in df.columns if 'reviews_count' in c or 'author_reviews' in c]
+        if rev_cols: df['author_reviews_count'] = df[rev_cols[0]]
+        else: df['author_reviews_count'] = 10 
     # -----------------------------------------------
     
-    # Identify the restaurant name column safely
     name_col = 'restaurant_name' if 'restaurant_name' in df.columns else df.columns[0]
     
-    # Identify rating column safely
     if 'rating' not in df.columns:
         rating_cols = [c for c in df.columns if 'rating' in c or 'score' in c or 'stars' in c]
         if rating_cols: df['rating'] = df[rating_cols[0]]
         else: return None, "Could not find a 'rating' column in your CSV."
         
-    # FAILSAFE: If there are somehow still multiple 'rating' columns, take the first one
     if isinstance(df['rating'], pd.DataFrame):
         df['rating'] = df['rating'].iloc[:, 0]
 
-    # Graceful handling of missing expected columns
-    if 'local_guide_level' not in df.columns: df['local_guide_level'] = 0
+    df['local_guide_level'] = pd.to_numeric(df['local_guide_level'], errors='coerce').fillna(0)
     if 'review_text' not in df.columns: df['review_text'] = ''
+    df['review_text'] = df['review_text'].fillna('')
+    df['rating'] = pd.to_numeric(df['rating'], errors='coerce').fillna(3)
+    df['author_reviews_count'] = pd.to_numeric(df['author_reviews_count'], errors='coerce').fillna(10)
     
-    # Handle Photo Boolean mapping
-    if 'has_photo' not in df.columns: 
-        df['has_photo'] = False
+    if 'has_photo' not in df.columns: df['has_photo'] = False
     elif df['has_photo'].dtype == object:
         df['has_photo'] = df['has_photo'].astype(str).str.lower().isin(['true', 'yes', '1', 't'])
         
-    # Handle Dates (Updated to safely strip UTC timezones from Outscraper)
     if 'months_old' not in df.columns:
         date_cols = [c for c in df.columns if 'date' in c or 'time' in c]
         if date_cols:
-            df['date_parsed'] = pd.to_datetime(df[date_cols[0]], errors='coerce')
-            df['date_parsed'] = df['date_parsed'].dt.tz_localize(None)
+            df['date_parsed'] = pd.to_datetime(df[date_cols[0]], errors='coerce').dt.tz_localize(None)
             df['months_old'] = ((pd.Timestamp.now().tz_localize(None) - df['date_parsed']).dt.days / 30)
         else:
             df['months_old'] = 12
 
-    # Clean NAs
-    df['local_guide_level'] = pd.to_numeric(df['local_guide_level'], errors='coerce').fillna(0)
-    df['review_text'] = df['review_text'].fillna('')
     df['months_old'] = pd.to_numeric(df['months_old'], errors='coerce').fillna(12)
-    df['rating'] = pd.to_numeric(df['rating'], errors='coerce').fillna(3)
+    
+    # 🚨 FLAG SUSPICIOUS REVIEWS (5-stars from ghost accounts <=3 lifetime reviews)
+    df['is_bot'] = ((df['rating'] == 5) & (df['author_reviews_count'] <= 3)).astype(int)
     
     # 1. Authority Weight
     auth_cond = [
@@ -132,12 +130,21 @@ def calculate_true_scores(df, weights, apply_smoothing):
         total_weight=('final_weight', 'sum'),
         sum_weighted_rating=('weighted_rating', 'sum'),
         total_reviews=('rating', 'count'),
-        google_rating=('rating', 'mean')
+        google_rating=('rating', 'mean'),
+        bot_count=('is_bot', 'sum'),
+        one_star_count=('rating', lambda x: (x == 1).sum())
     ).reset_index()
     
-    restaurants = restaurants[restaurants['total_weight'] > 0] # Avoid div by zero
+    restaurants = restaurants[restaurants['total_weight'] > 0]
+    
+    # Calculate Fraud Metrics
+    restaurants['bot_ratio'] = restaurants['bot_count'] / restaurants['total_reviews']
+    restaurants['one_star_ratio'] = restaurants['one_star_count'] / restaurants['total_reviews']
+    
+    # Calculate Custom Average
     restaurants['custom_avg'] = restaurants['sum_weighted_rating'] / restaurants['total_weight']
     
+    # Apply Smoothing
     if apply_smoothing and len(restaurants) > 1:
         C = restaurants['custom_avg'].mean() 
         M = restaurants['total_weight'].quantile(0.25) 
@@ -146,36 +153,48 @@ def calculate_true_scores(df, weights, apply_smoothing):
         ) / (restaurants['total_weight'] + M)
     else:
         restaurants['true_score'] = restaurants['custom_avg']
+        
+    # --- APPLY FRAUD PENALTIES ---
+    restaurants['penalty_applied'] = (restaurants['bot_ratio'] * weights['bot_penalty']) + (restaurants['one_star_ratio'] * weights['one_star'])
+    restaurants['true_score'] = restaurants['true_score'] - restaurants['penalty_applied']
     
     # Format and sort
-    final = restaurants[[name_col, 'google_rating', 'true_score', 'total_reviews']].copy()
+    final = restaurants[[name_col, 'google_rating', 'true_score', 'total_reviews', 'bot_ratio', 'one_star_ratio']].copy()
     final.rename(columns={
         name_col: 'Restaurant Name', 
-        'google_rating': 'Google Avg (Sample)', 
+        'google_rating': 'Google Avg', 
         'true_score': 'True Score', 
-        'total_reviews': 'Reviews Processed'
+        'total_reviews': 'Reviews',
+        'bot_ratio': 'Bot %',
+        'one_star_ratio': '1-Star %'
     }, inplace=True)
-    final['Score Diff'] = final['True Score'] - final['Google Avg (Sample)']
     
-    # Rounding
-    final['Google Avg (Sample)'] = final['Google Avg (Sample)'].round(2)
+    final['Score Diff'] = final['True Score'] - final['Google Avg']
+    
+    # Rounding & Formatting
+    final['Google Avg'] = final['Google Avg'].round(2)
     final['True Score'] = final['True Score'].round(2)
     final['Score Diff'] = final['Score Diff'].round(2)
+    final['Bot %'] = (final['Bot %'] * 100).round(1).astype(str) + '%'
+    final['1-Star %'] = (final['1-Star %'] * 100).round(1).astype(str) + '%'
+    
+    # Reorder columns
+    final = final[['Restaurant Name', 'Google Avg', 'True Score', 'Score Diff', 'Bot %', '1-Star %', 'Reviews']]
     
     return final.sort_values('True Score', ascending=False), None
 
 # --- 3. MAIN UI ---
 st.title("🍔 TrueScore: Google Maps Review Filter")
-st.markdown("Standard Google Maps treats all reviews equally. This tool applies a custom weighted algorithm to scraped Maps data to find the *true* best restaurants by filtering out bots, tourists, and low-effort 5-star ratings.")
+st.markdown("Standard Google Maps treats all reviews equally. This tool applies a custom weighted algorithm to find the *true* best restaurants, and actively punishes spots using fake review farms.")
 
-# Demo data generation if no file is present
 def generate_demo_data():
     return pd.DataFrame({
-        'restaurant_name': ['The Tourist Trap (High Rating, Low Effort)'] * 200 + ['Hidden Gem Kitchen (Lower Rating, High Effort)'] * 50,
-        'rating': [5.0]*180 + [1.0]*20 + [4.0]*5 + [5.0]*45,
-        'local_guide_level': np.random.choice([0, 1, 2], 200).tolist() + np.random.choice([5, 6, 7, 8], 50).tolist(),
-        'review_text': ['']*150 + ['Good']*50 + ['Absolutely incredible flavors, the chef really cares about...']*50,
-        'has_photo': [False]*190 + [True]*10 + [True]*50,  # <-- Fixed! Math now equals 250 exactly
+        'restaurant_name': ['The Paid Review Trap (Fake 5s, Angry 1s)'] * 200 + ['Hidden Gem Kitchen (Real Foodies)'] * 50,
+        'rating': [5.0]*160 + [1.0]*40 + [5.0]*40 + [4.0]*10,
+        'local_guide_level': np.random.choice([0, 1], 200).tolist() + np.random.choice([5, 6, 7, 8], 50).tolist(),
+        'review_text': ['']*150 + ['Terrible service, raw food!']*50 + ['Absolutely incredible flavors, the chef really cares about...']*50,
+        'has_photo': [False]*190 + [True]*10 + [True]*50,
+        'author_reviews_count': np.random.choice([1, 2, 3], 200).tolist() + np.random.choice([25, 80, 150], 50).tolist(),
         'months_old': np.random.randint(1, 48, 250)
     })
 
@@ -196,17 +215,16 @@ if uploaded_file is not None:
         st.error(f"Error reading CSV: {e}")
 elif load_demo:
     df = generate_demo_data()
-    st.info("Showing Demo Data. Feel free to play with the sliders!")
+    st.info("Showing Demo Data. Look at the Bot % and 1-Star % of the Tourist Trap!")
 
 if df is not None:
-    # Pack weights into a dictionary to pass to cached function
     current_weights = {
         'l0': w_level_0, 'l1': w_level_1_3, 'l4': w_level_4_6, 'l7': w_level_7_plus,
         'no_text': w_no_text, 'short': w_short_text, 'long': w_long_text, 'photo': w_photo_bonus,
-        'recent': w_recent, 'mid': w_mid, 'old': w_old
+        'recent': w_recent, 'mid': w_mid, 'old': w_old,
+        'bot_penalty': w_bot_penalty, 'one_star': w_one_star
     }
 
-    # Run the algorithm
     results, error = calculate_true_scores(df, current_weights, apply_smoothing)
     
     if error:
@@ -214,7 +232,6 @@ if df is not None:
     else:
         st.subheader("🏆 Adjusted Restaurant Rankings")
         
-        # Display top metrics
         if len(results) >= 2:
             m1, m2 = st.columns(2)
             top_restaurant = results.iloc[0]
@@ -224,9 +241,8 @@ if df is not None:
                 biggest_loser = results.sort_values('Score Diff').iloc[0]
                 st.metric(label=f"📉 Most Overrated", value=biggest_loser['Restaurant Name'], delta=f"{biggest_loser['Score Diff']} Drop")
         
-        # Style dataframe (Green for jumping up in rank, Red for dropping)
         def color_diff(val):
-            if pd.isna(val): return ''
+            if pd.isna(val) or isinstance(val, str): return ''
             color = 'rgba(46, 204, 113, 0.2)' if val > 0 else 'rgba(231, 76, 60, 0.2)' if val < 0 else ''
             return f'background-color: {color}'
         
@@ -235,15 +251,3 @@ if df is not None:
             use_container_width=True,
             hide_index=True
         )
-        
-        # Download button
-        st.download_button(
-            label="📥 Download TrueScore Rankings (CSV)",
-            data=results.to_csv(index=False).encode('utf-8'),
-            file_name='truescore_rankings.csv',
-            mime='text/csv',
-        )
-else:
-    st.info("👆 Upload a CSV file or click 'Load Demo Data' to get started.")
-
-st.caption("How to get data: Use a tool like Outscraper or Apify to export Maps reviews for your area into a CSV.")
