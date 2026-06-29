@@ -171,10 +171,15 @@ def calculate_true_scores(df, weights, apply_smoothing):
     
     final['Score Diff'] = final['True Score'] - final['Google Avg']
     
-    # Rounding & Formatting
+   # --- Rounding & Formatting ---
     final['Google Avg'] = final['Google Avg'].round(2)
     final['True Score'] = final['True Score'].round(2)
     final['Score Diff'] = final['Score Diff'].round(2)
+    
+    # Sort by True Score FIRST (as per your main requirement)
+    final = final.sort_values('True Score', ascending=False)
+    
+    # NOW convert to display-friendly strings
     final['Bot %'] = (final['Bot %'] * 100).round(1).astype(str) + '%'
     final['1-Star %'] = (final['1-Star %'] * 100).round(1).astype(str) + '%'
     
