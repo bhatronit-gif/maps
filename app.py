@@ -35,21 +35,30 @@ def calculate_true_scores(df, weights, apply_smoothing):
     
     # Standardize column names (lowercase, replace spaces)
     df.columns = df.columns.str.lower().str.replace(' ', '_')
-    # --- Outscraper Compatibility Formatting ---
+    
+    # --- FIXED Outscraper Compatibility Formatting ---
+    # Outscraper includes BOTH "rating" (restaurant avg) and "review_rating" (user's score).
+    # We must drop the place average first so we don't create duplicate column names!
+    if 'review_rating' in df.columns:
+        if 'rating' in df.columns:
+            df = df.drop(columns=['rating'])
+        df.rename(columns={'review_rating': 'rating'}, inplace=True)
+        
     if 'name' in df.columns and 'restaurant_name' not in df.columns: 
         df.rename(columns={'name': 'restaurant_name'}, inplace=True)
-    if 'review_rating' in df.columns: 
-        df.rename(columns={'review_rating': 'rating'}, inplace=True)
-    if 'review_datetime_utc' in df.columns: 
+        
+    if 'review_datetime_utc' in df.columns and 'date' not in df.columns: 
         df.rename(columns={'review_datetime_utc': 'date'}, inplace=True)
         
-    # Extract Local Guide Level from Outscraper's author_title column (e.g., "Local Guide · Level 6")
+    # Extract Local Guide Level from Outscraper's author_title column safely
     if 'author_title' in df.columns and 'local_guide_level' not in df.columns:
-        df['local_guide_level'] = df['author_title'].astype(str).str.extract(r'Level (\d+)').fillna(0)
+        df['local_guide_level'] = df['author_title'].astype(str).str.extract(r'Level (\d+)', expand=False).fillna(0)
         
     # Convert Outscraper image URLs into True/False for the photo bonus
     if 'review_img_url' in df.columns and 'has_photo' not in df.columns:
-        df['has_photo'] = df['review_img_url'].notna() & (df['review_img_url'] != '')
+        df['has_photo'] = df['review_img_url'].notna() & (df['review_img_url'].astype(str).str.strip() != '')
+    # -----------------------------------------------
+    
     # Identify the restaurant name column safely
     name_col = 'restaurant_name' if 'restaurant_name' in df.columns else df.columns[0]
     
@@ -58,6 +67,10 @@ def calculate_true_scores(df, weights, apply_smoothing):
         rating_cols = [c for c in df.columns if 'rating' in c or 'score' in c or 'stars' in c]
         if rating_cols: df['rating'] = df[rating_cols[0]]
         else: return None, "Could not find a 'rating' column in your CSV."
+        
+    # FAILSAFE: If there are somehow still multiple 'rating' columns, take the first one
+    if isinstance(df['rating'], pd.DataFrame):
+        df['rating'] = df['rating'].iloc[:, 0]
 
     # Graceful handling of missing expected columns
     if 'local_guide_level' not in df.columns: df['local_guide_level'] = 0
@@ -69,12 +82,13 @@ def calculate_true_scores(df, weights, apply_smoothing):
     elif df['has_photo'].dtype == object:
         df['has_photo'] = df['has_photo'].astype(str).str.lower().isin(['true', 'yes', '1', 't'])
         
-    # Handle Dates
+    # Handle Dates (Updated to safely strip UTC timezones from Outscraper)
     if 'months_old' not in df.columns:
         date_cols = [c for c in df.columns if 'date' in c or 'time' in c]
         if date_cols:
             df['date_parsed'] = pd.to_datetime(df[date_cols[0]], errors='coerce')
-            df['months_old'] = ((pd.Timestamp.now() - df['date_parsed']).dt.days / 30)
+            df['date_parsed'] = df['date_parsed'].dt.tz_localize(None)
+            df['months_old'] = ((pd.Timestamp.now().tz_localize(None) - df['date_parsed']).dt.days / 30)
         else:
             df['months_old'] = 12
 
@@ -135,11 +149,16 @@ def calculate_true_scores(df, weights, apply_smoothing):
     
     # Format and sort
     final = restaurants[[name_col, 'google_rating', 'true_score', 'total_reviews']].copy()
-    final.rename(columns={name_col: 'Restaurant Name', 'google_rating': 'Google Rating', 'true_score': 'True Score', 'total_reviews': 'Total Reviews'}, inplace=True)
-    final['Score Diff'] = final['True Score'] - final['Google Rating']
+    final.rename(columns={
+        name_col: 'Restaurant Name', 
+        'google_rating': 'Google Avg (Sample)', 
+        'true_score': 'True Score', 
+        'total_reviews': 'Reviews Processed'
+    }, inplace=True)
+    final['Score Diff'] = final['True Score'] - final['Google Avg (Sample)']
     
     # Rounding
-    final['Google Rating'] = final['Google Rating'].round(2)
+    final['Google Avg (Sample)'] = final['Google Avg (Sample)'].round(2)
     final['True Score'] = final['True Score'].round(2)
     final['Score Diff'] = final['Score Diff'].round(2)
     
