@@ -35,7 +35,21 @@ def calculate_true_scores(df, weights, apply_smoothing):
     
     # Standardize column names (lowercase, replace spaces)
     df.columns = df.columns.str.lower().str.replace(' ', '_')
-    
+    # --- Outscraper Compatibility Formatting ---
+    if 'name' in df.columns and 'restaurant_name' not in df.columns: 
+        df.rename(columns={'name': 'restaurant_name'}, inplace=True)
+    if 'review_rating' in df.columns: 
+        df.rename(columns={'review_rating': 'rating'}, inplace=True)
+    if 'review_datetime_utc' in df.columns: 
+        df.rename(columns={'review_datetime_utc': 'date'}, inplace=True)
+        
+    # Extract Local Guide Level from Outscraper's author_title column (e.g., "Local Guide · Level 6")
+    if 'author_title' in df.columns and 'local_guide_level' not in df.columns:
+        df['local_guide_level'] = df['author_title'].astype(str).str.extract(r'Level (\d+)').fillna(0)
+        
+    # Convert Outscraper image URLs into True/False for the photo bonus
+    if 'review_img_url' in df.columns and 'has_photo' not in df.columns:
+        df['has_photo'] = df['review_img_url'].notna() & (df['review_img_url'] != '')
     # Identify the restaurant name column safely
     name_col = 'restaurant_name' if 'restaurant_name' in df.columns else df.columns[0]
     
