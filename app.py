@@ -156,7 +156,7 @@ def generate_demo_data():
         'rating': [5.0]*180 + [1.0]*20 + [4.0]*5 + [5.0]*45,
         'local_guide_level': np.random.choice([0, 1, 2], 200).tolist() + np.random.choice([5, 6, 7, 8], 50).tolist(),
         'review_text': ['']*150 + ['Good']*50 + ['Absolutely incredible flavors, the chef really cares about...']*50,
-        'has_photo': [False]*190 + [True]*10 + [True]*40,
+        'has_photo': [False]*190 + [True]*10 + [True]*50,  # <-- Fixed! Math now equals 250 exactly
         'months_old': np.random.randint(1, 48, 250)
     })
 
