@@ -51,7 +51,7 @@ def calculate_true_scores(df, weights, apply_smoothing):
         df.rename(columns={'review_datetime_utc': 'date'}, inplace=True)
         
     if 'author_title' in df.columns and 'local_guide_level' not in df.columns:
-        df['local_guide_level'] = df['author_title'].astype(str).str.extract(r'Level (\d+)', expand=False).fillna(0)
+        df['local_guide_level'] = df['author_title'].astype(str).str.extract(r'(\d+)', expand=False).fillna(0)
         
     if 'review_img_url' in df.columns and 'has_photo' not in df.columns:
         df['has_photo'] = df['review_img_url'].notna() & (df['review_img_url'].astype(str).str.strip() != '')
