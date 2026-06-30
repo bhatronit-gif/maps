@@ -56,12 +56,11 @@ def calculate_true_scores(df, weights, apply_smoothing):
     if 'review_img_url' in df.columns and 'has_photo' not in df.columns:
         df['has_photo'] = df['review_img_url'].notna() & (df['review_img_url'].astype(str).str.strip() != '')
         
-    # NEW: Find Author Review Count for Bot Defense
+    # Find Author Review Count for Bot Defense
     if 'author_reviews_count' not in df.columns:
         rev_cols = [c for c in df.columns if 'reviews_count' in c or 'author_reviews' in c]
         if rev_cols: df['author_reviews_count'] = df[rev_cols[0]]
         else: df['author_reviews_count'] = 10 
-    # -----------------------------------------------
     
     name_col = 'restaurant_name' if 'restaurant_name' in df.columns else df.columns[0]
     
@@ -86,14 +85,16 @@ def calculate_true_scores(df, weights, apply_smoothing):
     if 'months_old' not in df.columns:
         date_cols = [c for c in df.columns if 'date' in c or 'time' in c]
         if date_cols:
-            df['date_parsed'] = pd.to_datetime(df[date_cols[0]], errors='coerce').dt.tz_localize(None)
+            df['date_parsed'] = pd.to_datetime(df[date_cols[0]], errors='coerce')
+            if df['date_parsed'].dt.tz is not None:
+                df['date_parsed'] = df['date_parsed'].dt.tz_localize(None)
             df['months_old'] = ((pd.Timestamp.now().tz_localize(None) - df['date_parsed']).dt.days / 30)
         else:
             df['months_old'] = 12
 
     df['months_old'] = pd.to_numeric(df['months_old'], errors='coerce').fillna(12)
     
-    # 🚨 FLAG SUSPICIOUS REVIEWS (5-stars from ghost accounts <=3 lifetime reviews)
+    # 🚨 FLAG SUSPICIOUS REVIEWS
     df['is_bot'] = ((df['rating'] == 5) & (df['author_reviews_count'] <= 3)).astype(int)
     
     # 1. Authority Weight
@@ -171,17 +172,11 @@ def calculate_true_scores(df, weights, apply_smoothing):
     
     final['Score Diff'] = final['True Score'] - final['Google Avg']
     
-   # --- Rounding & Formatting ---
-    final['Google Avg'] = final['Google Avg'].round(2)
-    final['True Score'] = final['True Score'].round(2)
-    final['Score Diff'] = final['Score Diff'].round(2)
-    
-    # Sort by True Score FIRST (as per your main requirement)
-    final = final.sort_values('True Score', ascending=False)
-    
-    # NOW convert to display-friendly strings
-    final['Bot %'] = (final['Bot %'] * 100).round(1).astype(str) + '%'
-    final['1-Star %'] = (final['1-Star %'] * 100).round(1).astype(str) + '%'
+    # --- THE FIX: KEEPING NUMBERS AS PURE FLOATS ---
+    # We multiply by 100 but do NOT convert them to text.
+    # We keep them as actual math values so Streamlit correctly knows 80.0 > 8.0!
+    final['Bot %'] = final['Bot %'] * 100
+    final['1-Star %'] = final['1-Star %'] * 100
     
     # Reorder columns
     final = final[['Restaurant Name', 'Google Avg', 'True Score', 'Score Diff', 'Bot %', '1-Star %', 'Reviews']]
@@ -241,18 +236,35 @@ if df is not None:
             m1, m2 = st.columns(2)
             top_restaurant = results.iloc[0]
             with m1:
-                st.metric(label=f"🥇 #1 True Rated", value=top_restaurant['Restaurant Name'], delta=f"{top_restaurant['True Score']} True Score")
+                st.metric(label=f"🥇 #1 True Rated", value=top_restaurant['Restaurant Name'], delta=f"{top_restaurant['True Score']:.2f} True Score")
             with m2:
                 biggest_loser = results.sort_values('Score Diff').iloc[0]
-                st.metric(label=f"📉 Most Overrated", value=biggest_loser['Restaurant Name'], delta=f"{biggest_loser['Score Diff']} Drop")
+                st.metric(label=f"📉 Most Overrated", value=biggest_loser['Restaurant Name'], delta=f"{biggest_loser['Score Diff']:.2f} Drop")
         
         def color_diff(val):
             if pd.isna(val) or isinstance(val, str): return ''
             color = 'rgba(46, 204, 113, 0.2)' if val > 0 else 'rgba(231, 76, 60, 0.2)' if val < 0 else ''
             return f'background-color: {color}'
         
+        # --- UI FORMATTING (This is where the magic happens) ---
+        # We tell Streamlit's UI layer to visually format the numbers for us, 
+        # but keep them as actual math values in the background.
         st.dataframe(
             results.style.map(color_diff, subset=['Score Diff']), 
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            column_config={
+                "Google Avg": st.column_config.NumberColumn(format="%.2f"),
+                "True Score": st.column_config.NumberColumn(format="%.2f"),
+                "Score Diff": st.column_config.NumberColumn(format="%+.2f"), # Displays a + or - sign!
+                "Bot %": st.column_config.NumberColumn(format="%.1f%%"),     # Formats float 80.0 visually as "80.0%"
+                "1-Star %": st.column_config.NumberColumn(format="%.1f%%"),  
+            }
+        )
+        
+        st.download_button(
+            label="📥 Download Results (CSV)",
+            data=results.to_csv(index=False).encode('utf-8'),
+            file_name='truescore_rankings.csv',
+            mime='text/csv',
         )
