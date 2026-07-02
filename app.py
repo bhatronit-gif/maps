@@ -63,11 +63,14 @@ def calculate_true_scores(df, weights, apply_smoothing):
         else: df['author_reviews_count'] = 10 
     
     name_col = 'restaurant_name' if 'restaurant_name' in df.columns else df.columns[0]
-    
+    if name_col != 'restaurant_name':
+        df.rename(columns={name_col: 'restaurant_name'}, inplace=True)
+        name_col = 'restaurant_name'
+        
     if 'rating' not in df.columns:
         rating_cols = [c for c in df.columns if 'rating' in c or 'score' in c or 'stars' in c]
         if rating_cols: df['rating'] = df[rating_cols[0]]
-        else: return None, "Could not find a 'rating' column in your CSV."
+        else: return None, None, "Could not find a 'rating' column in your CSV."
         
     if isinstance(df['rating'], pd.DataFrame):
         df['rating'] = df['rating'].iloc[:, 0]
@@ -172,16 +175,15 @@ def calculate_true_scores(df, weights, apply_smoothing):
     
     final['Score Diff'] = final['True Score'] - final['Google Avg']
     
-    # --- THE FIX: KEEPING NUMBERS AS PURE FLOATS ---
-    # We multiply by 100 but do NOT convert them to text.
-    # We keep them as actual math values so Streamlit correctly knows 80.0 > 8.0!
+    # Keeping numbers as pure floats
     final['Bot %'] = final['Bot %'] * 100
     final['1-Star %'] = final['1-Star %'] * 100
     
     # Reorder columns
     final = final[['Restaurant Name', 'Google Avg', 'True Score', 'Score Diff', 'Bot %', '1-Star %', 'Reviews']]
     
-    return final.sort_values('True Score', ascending=False), None
+    # WE NOW RETURN BOTH THE FINAL RANKINGS AND THE RAW DATAFRAME
+    return final.sort_values('True Score', ascending=False), df, None
 
 # --- 3. MAIN UI ---
 st.title("🍔 TrueScore: Google Maps Review Filter")
@@ -192,7 +194,7 @@ def generate_demo_data():
         'restaurant_name': ['The Paid Review Trap (Fake 5s, Angry 1s)'] * 200 + ['Hidden Gem Kitchen (Real Foodies)'] * 50,
         'rating': [5.0]*160 + [1.0]*40 + [5.0]*40 + [4.0]*10,
         'local_guide_level': np.random.choice([0, 1], 200).tolist() + np.random.choice([5, 6, 7, 8], 50).tolist(),
-        'review_text': ['']*150 + ['Terrible service, raw food!']*50 + ['Absolutely incredible flavors, the chef really cares about...']*50,
+        'review_text': ['']*150 + ['Terrible service, raw food! Avoid at all costs.']*50 + ['Absolutely incredible flavors! You MUST order the duck confit and ask for their natural wine pairings. The chef really cares about the details.']*50,
         'has_photo': [False]*190 + [True]*10 + [True]*50,
         'author_reviews_count': np.random.choice([1, 2, 3], 200).tolist() + np.random.choice([25, 80, 150], 50).tolist(),
         'months_old': np.random.randint(1, 48, 250)
@@ -215,7 +217,7 @@ if uploaded_file is not None:
         st.error(f"Error reading CSV: {e}")
 elif load_demo:
     df = generate_demo_data()
-    st.info("Showing Demo Data. Look at the Bot % and 1-Star % of the Tourist Trap!")
+    st.info("Showing Demo Data. Scroll down to read the trusted reviews!")
 
 if df is not None:
     current_weights = {
@@ -225,7 +227,8 @@ if df is not None:
         'bot_penalty': w_bot_penalty, 'one_star': w_one_star
     }
 
-    results, error = calculate_true_scores(df, current_weights, apply_smoothing)
+    # UNPACKING ALL 3 VARIABLES
+    results, raw_df, error = calculate_true_scores(df, current_weights, apply_smoothing)
     
     if error:
         st.error(error)
@@ -246,9 +249,6 @@ if df is not None:
             color = 'rgba(46, 204, 113, 0.2)' if val > 0 else 'rgba(231, 76, 60, 0.2)' if val < 0 else ''
             return f'background-color: {color}'
         
-        # --- UI FORMATTING (This is where the magic happens) ---
-        # We tell Streamlit's UI layer to visually format the numbers for us, 
-        # but keep them as actual math values in the background.
         st.dataframe(
             results.style.map(color_diff, subset=['Score Diff']), 
             use_container_width=True,
@@ -256,8 +256,8 @@ if df is not None:
             column_config={
                 "Google Avg": st.column_config.NumberColumn(format="%.2f"),
                 "True Score": st.column_config.NumberColumn(format="%.2f"),
-                "Score Diff": st.column_config.NumberColumn(format="%+.2f"), # Displays a + or - sign!
-                "Bot %": st.column_config.NumberColumn(format="%.1f%%"),     # Formats float 80.0 visually as "80.0%"
+                "Score Diff": st.column_config.NumberColumn(format="%+.2f"), 
+                "Bot %": st.column_config.NumberColumn(format="%.1f%%"),     
                 "1-Star %": st.column_config.NumberColumn(format="%.1f%%"),  
             }
         )
@@ -268,3 +268,49 @@ if df is not None:
             file_name='truescore_rankings.csv',
             mime='text/csv',
         )
+        
+        # --- NEW SECTION: REVIEW VIEWER ---
+        st.divider()
+        st.subheader("📖 Read Best Reviews & Dish Recommendations")
+        st.markdown("Select a restaurant below to read its reviews. **Reviews are sorted by Trust Weight**, so the most detailed, verified foodie recommendations appear first!")
+        
+        # Dropdown to select a restaurant
+        restaurant_list = results['Restaurant Name'].tolist()
+        selected_restaurant = st.selectbox("Choose a restaurant to investigate:", restaurant_list)
+        
+        if selected_restaurant:
+            # Filter the raw data to only show the selected restaurant
+            restaurant_reviews = raw_df[raw_df['restaurant_name'] == selected_restaurant].copy()
+            
+            # Sort the reviews by the custom mathematical weight we built!
+            top_reviews = restaurant_reviews.sort_values('final_weight', ascending=False)
+            
+            count = 0
+            for _, row in top_reviews.iterrows():
+                review_text = str(row['review_text']).strip()
+                if review_text == '' or review_text.lower() == 'nan':
+                    continue
+                
+                count += 1
+                if count > 5:
+                    break
+                    
+                with st.chat_message("user"):
+                    stars = '⭐' * int(row['rating'])
+                    guide = f" | 🏅 Level {int(row['local_guide_level'])} Guide" if row['local_guide_level'] > 0 else ""
+                    months = f" | 📅 {int(row['months_old'])} months ago" if pd.notna(row['months_old']) else ""
+                    
+                    st.markdown(f"**{stars}{guide}{months}**")
+                    st.write(review_text)
+                    
+                    details = []
+                    if row['has_photo']:
+                        details.append("📸 *Included photos*")
+                    if row['is_bot'] == 1:
+                        details.append("🚨 *Ghost Account*")
+                    details.append(f"*Algorithm Weight: {row['final_weight']:.2f}x*")
+                    
+                    st.caption(" • ".join(details))
+            
+            if count == 0:
+                st.info("No text reviews available for this restaurant.")
