@@ -303,8 +303,12 @@ def calculate_true_scores(df, weights, apply_smoothing, bot_phrases_list):
     elif df['has_photo'].dtype == object:
         df['has_photo'] = df['has_photo'].astype(str).str.lower().isin(['true', 'yes', '1', 't'])
         
-    # Identify and clean category/type column for Cuisines
-    cat_cols = [c for c in df.columns if any(k in c for k in ['cat', 'type', 'cuisine', 'genre', 'tag', 'label', 'class', 'kind'])]
+    # Identify and clean category/type column for Cuisines (excluding URL/link columns)
+    cat_cols = [
+        c for c in df.columns 
+        if any(k in c for k in ['cat', 'type', 'cuisine', 'genre', 'tag', 'label', 'class', 'kind'])
+        and not any(neg in c for neg in ['link', 'url', 'uri', 'website', 'http', 'href'])
+    ]
     if cat_cols:
         cat_series = df[cat_cols[0]].fillna("Unknown").astype(str).str.title()
         for suffix in [" Restaurant", " Cafe", " Shop", " Bar", " Eatery", " Place", " Grill", " Bistro", " Buffet", " Diner", " Joint", " Pub"]:
