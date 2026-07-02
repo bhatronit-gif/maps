@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import re
 import urllib.parse
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+import plotly.express as px
+import plotly.graph_objects as go
 
 # Safely load translator
 try:
@@ -13,36 +16,243 @@ except ImportError:
 
 st.set_page_config(page_title="TrueScore: Google Maps Filter", layout="wide", page_icon="🍔")
 
+# --- CUSTOM CSS DESIGN ---
+st.markdown("""
+<style>
+    /* Foodie Card Styling */
+    .foodie-card {
+        background: rgba(30, 30, 40, 0.45);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 14px;
+        padding: 20px;
+        margin: 10px 0;
+        transition: transform 0.25s ease, box-shadow 0.25s ease;
+        position: relative;
+        overflow: hidden;
+    }
+    .foodie-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+    
+    /* Rank Badges */
+    .rank-badge {
+        font-size: 0.85rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        padding: 4px 10px;
+        border-radius: 8px;
+        display: inline-block;
+        margin-bottom: 12px;
+    }
+    
+    .gold-card {
+        border-left: 5px solid #f1c40f;
+        box-shadow: 0 4px 15px rgba(241, 196, 15, 0.08);
+    }
+    .gold-card .rank-badge {
+        background: rgba(241, 196, 15, 0.15);
+        color: #f1c40f;
+    }
+    
+    .silver-card {
+        border-left: 5px solid #bdf3ff;
+        box-shadow: 0 4px 15px rgba(189, 243, 255, 0.08);
+    }
+    .silver-card .rank-badge {
+        background: rgba(189, 243, 255, 0.15);
+        color: #bdf3ff;
+    }
+    
+    .bronze-card {
+        border-left: 5px solid #e67e22;
+        box-shadow: 0 4px 15px rgba(230, 126, 34, 0.08);
+    }
+    .bronze-card .rank-badge {
+        background: rgba(230, 126, 34, 0.15);
+        color: #e67e22;
+    }
+    
+    .overrated-card {
+        border-left: 5px solid #e74c3c;
+        background: rgba(231, 76, 60, 0.04);
+        box-shadow: 0 4px 15px rgba(231, 76, 60, 0.08);
+    }
+    .overrated-card .rank-badge {
+        background: rgba(231, 76, 60, 0.15);
+        color: #e74c3c;
+    }
+    
+    /* Metrics */
+    .restaurant-title {
+        font-size: 1.15rem;
+        font-weight: 700;
+        margin: 0 0 10px 0;
+        color: #ffffff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .score-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 6px;
+    }
+    .score-label {
+        font-size: 0.9rem;
+        color: rgba(255, 255, 255, 0.6);
+    }
+    .score-value {
+        font-size: 1.35rem;
+        font-weight: 800;
+        color: #ffffff;
+    }
+    .diff-badge {
+        font-size: 0.8rem;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 6px;
+    }
+    .diff-badge.positive {
+        background: rgba(46, 204, 113, 0.15);
+        color: #2ecc71;
+    }
+    .diff-badge.negative {
+        background: rgba(231, 76, 60, 0.15);
+        color: #e74c3c;
+    }
+    
+    .card-footer {
+        font-size: 0.75rem;
+        color: rgba(255, 255, 255, 0.4);
+        margin-top: 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.05);
+        padding-top: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- 1. SIDEBAR CONFIGURATION ---
 st.sidebar.header("⚙️ Algorithm Weights")
 
+# Predefined weight configurations
+PRESETS = {
+    "Default Balanced": {
+        "level_0": 1.0, "level_1_3": 1.2, "level_4_6": 2.0, "level_7_plus": 5.0,
+        "no_text": 0.2, "short_text": 1.0, "long_text": 1.5, "photo_bonus": 1.0,
+        "recent": 1.2, "mid": 1.0, "old": 0.5,
+        "bot_penalty": 1.5, "one_star": 1.0, "sentiment_mismatch": 0.2
+    },
+    "Strict Anti-Fraud": {
+        "level_0": 0.5, "level_1_3": 1.0, "level_4_6": 2.0, "level_7_plus": 6.0,
+        "no_text": 0.0, "short_text": 0.5, "long_text": 2.0, "photo_bonus": 1.5,
+        "recent": 1.5, "mid": 0.8, "old": 0.2,
+        "bot_penalty": 3.0, "one_star": 2.0, "sentiment_mismatch": 0.5
+    },
+    "Foodie Favorite": {
+        "level_0": 0.5, "level_1_3": 1.0, "level_4_6": 3.0, "level_7_plus": 8.0,
+        "no_text": 0.1, "short_text": 0.8, "long_text": 2.5, "photo_bonus": 2.0,
+        "recent": 1.0, "mid": 1.0, "old": 0.8,
+        "bot_penalty": 1.0, "one_star": 1.0, "sentiment_mismatch": 0.1
+    },
+    "Recent Bias": {
+        "level_0": 1.0, "level_1_3": 1.2, "level_4_6": 2.0, "level_7_plus": 5.0,
+        "no_text": 0.2, "short_text": 1.0, "long_text": 1.5, "photo_bonus": 1.0,
+        "recent": 2.0, "mid": 0.5, "old": 0.0,
+        "bot_penalty": 1.5, "one_star": 1.0, "sentiment_mismatch": 0.2
+    }
+}
+
+# Initialize session state keys for all slider parameters
+for key, val in PRESETS["Default Balanced"].items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+if "selected_preset" not in st.session_state:
+    st.session_state["selected_preset"] = "Default Balanced"
+
+# Callbacks for two-way synchronization
+def on_preset_change():
+    preset_name = st.session_state["preset_select"]
+    if preset_name != "Custom":
+        for key, val in PRESETS[preset_name].items():
+            st.session_state[key] = val
+        st.session_state["selected_preset"] = preset_name
+
+def on_slider_change():
+    current_vals = {key: st.session_state[key] for key in PRESETS["Default Balanced"].keys()}
+    matched = "Custom"
+    for preset_name, preset_vals in PRESETS.items():
+        if all(abs(current_vals[k] - preset_vals[k]) < 0.01 for k in preset_vals):
+            matched = preset_name
+            break
+    st.session_state["selected_preset"] = matched
+
+preset_options = ["Custom", "Default Balanced", "Strict Anti-Fraud", "Foodie Favorite", "Recent Bias"]
+curr_preset = st.session_state["selected_preset"]
+preset_idx = preset_options.index(curr_preset) if curr_preset in preset_options else 0
+
+preset_select = st.sidebar.selectbox(
+    "📋 Algorithm Weight Preset",
+    options=preset_options,
+    index=preset_idx,
+    key="preset_select",
+    on_change=on_preset_change
+)
+
 st.sidebar.subheader("1. Authority (Local Guide Level)")
-w_level_0 = st.sidebar.slider("Level 0 (No Level)", 0.0, 2.0, 1.0, 0.1)
-w_level_1_3 = st.sidebar.slider("Level 1-3", 0.0, 3.0, 1.2, 0.1)
-w_level_4_6 = st.sidebar.slider("Level 4-6", 0.0, 5.0, 2.0, 0.1)
-w_level_7_plus = st.sidebar.slider("Level 7-10", 1.0, 10.0, 5.0, 0.5)
+w_level_0 = st.sidebar.slider("Level 0 (No Level)", 0.0, 2.0, key="level_0", on_change=on_slider_change)
+w_level_1_3 = st.sidebar.slider("Level 1-3", 0.0, 3.0, key="level_1_3", on_change=on_slider_change)
+w_level_4_6 = st.sidebar.slider("Level 4-6", 0.0, 5.0, key="level_4_6", on_change=on_slider_change)
+w_level_7_plus = st.sidebar.slider("Level 7-10", 1.0, 10.0, key="level_7_plus", on_change=on_slider_change)
 
 st.sidebar.subheader("2. Effort & Proof")
-w_no_text = st.sidebar.slider("No Text (Stars Only)", 0.0, 1.0, 0.2, 0.1)
-w_short_text = st.sidebar.slider("Short Text (<100 chars)", 0.0, 2.0, 1.0, 0.1)
-w_long_text = st.sidebar.slider("Detailed Text (>100 chars)", 1.0, 5.0, 1.5, 0.1)
-w_photo_bonus = st.sidebar.slider("Photo Included Bonus (+)", 0.0, 3.0, 1.0, 0.1)
+w_no_text = st.sidebar.slider("No Text (Stars Only)", 0.0, 1.0, key="no_text", on_change=on_slider_change)
+w_short_text = st.sidebar.slider("Short Text (<100 chars)", 0.0, 2.0, key="short_text", on_change=on_slider_change)
+w_long_text = st.sidebar.slider("Detailed Text (>100 chars)", 1.0, 5.0, key="long_text", on_change=on_slider_change)
+w_photo_bonus = st.sidebar.slider("Photo Included Bonus (+)", 0.0, 3.0, key="photo_bonus", on_change=on_slider_change)
 
 st.sidebar.subheader("3. Recency")
-w_recent = st.sidebar.slider("< 1 Year Old", 0.5, 2.0, 1.2, 0.1)
-w_mid = st.sidebar.slider("1-3 Years Old", 0.5, 2.0, 1.0, 0.1)
-w_old = st.sidebar.slider("> 3 Years Old", 0.0, 1.0, 0.5, 0.1)
+w_recent = st.sidebar.slider("< 1 Year Old", 0.5, 2.0, key="recent", on_change=on_slider_change)
+w_mid = st.sidebar.slider("1-3 Years Old", 0.5, 2.0, key="mid", on_change=on_slider_change)
+w_old = st.sidebar.slider("> 3 Years Old", 0.0, 1.0, key="old", on_change=on_slider_change)
 
 st.sidebar.subheader("🚨 4. Anti-Fraud Penalties")
-w_bot_penalty = st.sidebar.slider("Ghost Account Penalty", 0.0, 3.0, 1.5, 0.1)
-w_one_star = st.sidebar.slider("Tourist Trap Penalty (1-Star %)", 0.0, 3.0, 1.0, 0.1)
+w_bot_penalty = st.sidebar.slider("Ghost Account Penalty", 0.0, 3.0, key="bot_penalty", on_change=on_slider_change)
+w_one_star = st.sidebar.slider("Tourist Trap Penalty (1-Star %)", 0.0, 3.0, key="one_star", on_change=on_slider_change)
+w_sentiment_mismatch = st.sidebar.slider(
+    "Sentiment Mismatch Multiplier", 0.0, 1.0, key="sentiment_mismatch", on_change=on_slider_change,
+    help="Multiplier applied to the weight of reviews where the text sentiment contradicts the rating (e.g. 5 stars + negative text). 0.0 discards them, 1.0 ignores the penalty."
+)
+
+DEFAULT_BOT_PHRASES = "good, great, nice, amazing, excellent, perfect, love it, ok, best, cool, highly recommend, highly recommended, good food, nice place, great food, great service, friendly staff, five stars, 5 stars, super, awesome, wow"
+
+with st.sidebar.expander("📝 Custom Bot Phrases"):
+    bot_phrases_input = st.text_area(
+        "List of generic phrases (comma-separated):",
+        value=DEFAULT_BOT_PHRASES,
+        height=150,
+        help="Reviews matching these exactly (case-insensitive, ignoring punctuation) will be flagged as bots if submitted by low guide level reviewers (<= 1)."
+    )
+
+import string
+def clean_phrase(p):
+    p_clean = p.lower().translate(str.maketrans('', '', string.punctuation)).strip()
+    return " ".join(p_clean.split())
+
+bot_phrases_list = [clean_phrase(p) for p in bot_phrases_input.split(",") if p.strip()]
 
 st.sidebar.subheader("5. Advanced")
 apply_smoothing = st.sidebar.checkbox("Apply Bayesian Smoothing", value=True)
 
 # --- 2. DATA PROCESSING FUNCTION ---
 @st.cache_data
-def calculate_true_scores(df, weights, apply_smoothing):
+def calculate_true_scores(df, weights, apply_smoothing, bot_phrases_list):
     df = df.copy()
     df.columns = df.columns.str.lower().str.replace(' ', '_')
     
@@ -104,7 +314,41 @@ def calculate_true_scores(df, weights, apply_smoothing):
     df['months_old'] = pd.to_numeric(df['months_old'], errors='coerce').fillna(12)
     
     # 🚨 FLAG SUSPICIOUS REVIEWS
-    df['is_bot'] = ((df['rating'] == 5) & (df['author_reviews_count'] <= 3)).astype(int)
+    # Heuristic 1: Low Account Activity (Low reviews count)
+    df['is_bot_count'] = ((df['rating'] == 5) & (df['author_reviews_count'] <= 3)).astype(int)
+    
+    # Clean text helper
+    import string
+    def clean_text_func(txt):
+        if not isinstance(txt, str):
+            return ""
+        txt_clean = txt.lower().translate(str.maketrans('', '', string.punctuation)).strip()
+        return " ".join(txt_clean.split())
+        
+    df['cleaned_review_text'] = df['review_text'].apply(clean_text_func)
+    
+    # Heuristic 2: Low guide level + generic phrase match
+    bot_phrases_set = set(bot_phrases_list)
+    df['is_bot_phrase'] = ((df['rating'] == 5) & (df['local_guide_level'] <= 1) & (df['cleaned_review_text'].isin(bot_phrases_set))).astype(int)
+    
+    df['is_bot'] = (df['is_bot_count'] | df['is_bot_phrase']).astype(int)
+    
+    # 🚨 SENTIMENT MISMATCH DETECTION (VADER)
+    analyzer = SentimentIntensityAnalyzer()
+    
+    def get_sentiment_compound(txt):
+        if not isinstance(txt, str) or not txt.strip():
+            return 0.0
+        try:
+            return analyzer.polarity_scores(txt)['compound']
+        except Exception:
+            return 0.0
+            
+    df['sentiment_compound'] = df['review_text'].apply(get_sentiment_compound)
+    
+    df['is_contradictory_positive'] = ((df['rating'] >= 4.0) & (df['sentiment_compound'] <= -0.1)).astype(int)
+    df['is_contradictory_negative'] = ((df['rating'] <= 2.0) & (df['sentiment_compound'] >= 0.1)).astype(int)
+    df['is_sentiment_mismatch'] = (df['is_contradictory_positive'] | df['is_contradictory_negative']).astype(int)
     
     auth_cond = [(df['local_guide_level'] >= 7), (df['local_guide_level'] >= 4), (df['local_guide_level'] >= 1)]
     df['auth_weight'] = np.select(auth_cond, [weights['l7'], weights['l4'], weights['l1']], default=weights['l0'])
@@ -118,6 +362,11 @@ def calculate_true_scores(df, weights, apply_smoothing):
     df['recency_weight'] = np.select(recency_cond, [weights['recent'], weights['mid']], default=weights['old'])
                                
     df['final_weight'] = df['auth_weight'] * df['effort_weight'] * df['recency_weight']
+    
+    # Apply sentiment mismatch discount
+    mismatch_multiplier = weights.get('sentiment_mismatch', 0.2)
+    df['final_weight'] = np.where(df['is_sentiment_mismatch'] == 1, df['final_weight'] * mismatch_multiplier, df['final_weight'])
+    
     df['weighted_rating'] = df['rating'] * df['final_weight']
     
     restaurants = df.groupby(name_col).agg(
@@ -168,14 +417,42 @@ st.title("🍔 TrueScore: Google Maps Review Filter")
 st.markdown("Find the *true* best restaurants, search for specific dishes, and translate local reviews on the fly.")
 
 def generate_demo_data():
+    trap_names = ['The Paid Review Trap (Fake 5s, Angry 1s)'] * 222
+    gem_names = ['Hidden Gem Kitchen (Real Foodies)'] * 50
+    
+    # 220 regular trap + 2 contradictory trap reviews
+    trap_ratings = [5.0]*160 + [1.0]*40 + [5.0]*20 + [5.0, 1.0]
+    trap_guides = np.random.choice([0, 1], 200).tolist() + [0]*20 + [4, 5]
+    
+    trap_texts = (
+        ['']*150 + 
+        ['Terrible service, raw food! Avoid at all costs.']*50 + 
+        ['Nice!']*5 + ['Great food']*5 + ['Highly recommend!']*5 + ['Love it']*5 +
+        [
+            "Worst restaurant ever! The food was cold, service was rude, and we got food poisoning. Never coming back!",
+            "Absolutely fantastic experience! The duck confit was cooked to perfection, the service was fast, and the atmosphere was lovely. Highly recommend!"
+        ]
+    )
+    trap_photos = [False]*190 + [True]*10 + [False]*20 + [False, True]
+    
+    trap_author_counts = np.random.choice([1, 2, 3], 200).tolist() + [5]*20 + [12, 20]
+    trap_months = np.random.randint(1, 48, 220).tolist() + [6, 8]
+    
+    gem_ratings = [5.0]*40 + [4.0]*10
+    gem_guides = np.random.choice([5, 6, 7, 8], 50).tolist()
+    gem_texts = ['Incroyable! Le canard confit est le meilleur de Paris. Le vin naturel était parfait.']*50
+    gem_photos = [True]*50
+    gem_author_counts = np.random.choice([25, 80, 150], 50).tolist()
+    gem_months = np.random.randint(1, 48, 50).tolist()
+    
     return pd.DataFrame({
-        'restaurant_name': ['The Paid Review Trap (Fake 5s, Angry 1s)'] * 200 + ['Hidden Gem Kitchen (Real Foodies)'] * 50,
-        'rating': [5.0]*160 + [1.0]*40 + [5.0]*40 + [4.0]*10,
-        'local_guide_level': np.random.choice([0, 1], 200).tolist() + np.random.choice([5, 6, 7, 8], 50).tolist(),
-        'review_text': ['']*150 + ['Terrible service, raw food! Avoid at all costs.']*50 + ['Incroyable! Le canard confit est le meilleur de Paris. Le vin naturel était parfait.']*50,
-        'has_photo': [False]*190 + [True]*10 + [True]*50,
-        'author_reviews_count': np.random.choice([1, 2, 3], 200).tolist() + np.random.choice([25, 80, 150], 50).tolist(),
-        'months_old': np.random.randint(1, 48, 250)
+        'restaurant_name': trap_names + gem_names,
+        'rating': trap_ratings + gem_ratings,
+        'local_guide_level': trap_guides + gem_guides,
+        'review_text': trap_texts + gem_texts,
+        'has_photo': trap_photos + gem_photos,
+        'author_reviews_count': trap_author_counts + gem_author_counts,
+        'months_old': trap_months + gem_months
     })
 
 col1, col2 = st.columns([1, 1])
@@ -201,27 +478,214 @@ if df is not None:
         'l0': w_level_0, 'l1': w_level_1_3, 'l4': w_level_4_6, 'l7': w_level_7_plus,
         'no_text': w_no_text, 'short': w_short_text, 'long': w_long_text, 'photo': w_photo_bonus,
         'recent': w_recent, 'mid': w_mid, 'old': w_old,
-        'bot_penalty': w_bot_penalty, 'one_star': w_one_star
+        'bot_penalty': w_bot_penalty, 'one_star': w_one_star,
+        'sentiment_mismatch': w_sentiment_mismatch
     }
 
-    results, raw_df, error = calculate_true_scores(df, current_weights, apply_smoothing)
+    results, raw_df, error = calculate_true_scores(df, current_weights, apply_smoothing, bot_phrases_list)
     
     if error:
         st.error(error)
     else:
+        # --- ANTI-FRAUD STATUS BREAKDOWN ---
+        with st.expander("🔍 Anti-Fraud Flag Breakdown", expanded=False):
+            total_revs = len(raw_df)
+            flagged_count = int(raw_df['is_bot'].sum())
+            flagged_count_activity = int(raw_df['is_bot_count'].sum())
+            flagged_count_phrase = int(raw_df['is_bot_phrase'].sum())
+            flagged_count_sentiment = int(raw_df['is_sentiment_mismatch'].sum()) if 'is_sentiment_mismatch' in raw_df.columns else 0
+            
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Total Reviews", f"{total_revs:,}")
+            c2.metric("Flagged Bots (Total)", f"{flagged_count:,}", f"{(flagged_count/total_revs*100):.1f}% of total" if total_revs > 0 else "0.0%")
+            c3.metric("Flagged: Low Activity", f"{flagged_count_activity:,}", f"{(flagged_count_activity/total_revs*100):.1f}%" if total_revs > 0 else "0.0%")
+            c4.metric("Flagged: Generic Phrases", f"{flagged_count_phrase:,}", f"{(flagged_count_phrase/total_revs*100):.1f}%" if total_revs > 0 else "0.0%")
+            c5.metric("Sentiment Mismatch", f"{flagged_count_sentiment:,}", f"{(flagged_count_sentiment/total_revs*100):.1f}%" if total_revs > 0 else "0.0%")
+            
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                # Show a list of flagged reviews for transparency
+                phrase_flagged_examples = raw_df[raw_df['is_bot_phrase'] == 1][['restaurant_name', 'rating', 'review_text', 'local_guide_level']].copy()
+                if len(phrase_flagged_examples) > 0:
+                    st.markdown("### 📝 Sample Reviews Flagged for Generic Phrases")
+                    st.dataframe(phrase_flagged_examples.rename(columns={
+                        'restaurant_name': 'Restaurant',
+                        'rating': 'Stars',
+                        'review_text': 'Review Text',
+                        'local_guide_level': 'Guide Level'
+                    }).head(10), use_container_width=True, hide_index=True)
+            with col_b2:
+                # Show a list of sentiment mismatch reviews for transparency
+                if 'is_sentiment_mismatch' in raw_df.columns:
+                    sentiment_flagged_examples = raw_df[raw_df['is_sentiment_mismatch'] == 1][['restaurant_name', 'rating', 'review_text', 'sentiment_compound']].copy()
+                    if len(sentiment_flagged_examples) > 0:
+                        st.markdown("### 🎭 Sample Reviews Flagged for Sentiment Mismatch")
+                        st.dataframe(sentiment_flagged_examples.rename(columns={
+                            'restaurant_name': 'Restaurant',
+                            'rating': 'Stars',
+                            'review_text': 'Review Text',
+                            'sentiment_compound': 'Sentiment Score'
+                        }).head(10), use_container_width=True, hide_index=True)
+
         # We divide the UI into Tabs for a cleaner experience
-        tab1, tab2, tab3 = st.tabs(["🏆 TrueScore Leaderboard", "🥘 Dish Finder", "📖 Read & Translate Reviews"])
+        tab1, tab_insights, tab2, tab3 = st.tabs(["🏆 TrueScore Leaderboard", "📊 Rating Insights", "🥘 Dish Finder", "📖 Read & Translate Reviews"])
         
         # --- TAB 1: LEADERBOARD ---
         with tab1:
-            if len(results) >= 2:
-                m1, m2 = st.columns(2)
-                top_restaurant = results.iloc[0]
-                with m1:
-                    st.metric(label=f"🥇 #1 True Rated", value=top_restaurant['Restaurant Name'], delta=f"{top_restaurant['True Score']:.2f} True Score")
-                with m2:
-                    biggest_loser = results.sort_values('Score Diff').iloc[0]
-                    st.metric(label=f"📉 Most Overrated", value=biggest_loser['Restaurant Name'], delta=f"{biggest_loser['Score Diff']:.2f} Drop")
+            if len(results) > 0:
+                card_cols = st.columns(4)
+                
+                # Rank 1: Gold
+                if len(results) >= 1:
+                    r1 = results.iloc[0]
+                    diff_class = "positive" if r1['Score Diff'] >= 0 else "negative"
+                    diff_sign = "+" if r1['Score Diff'] >= 0 else ""
+                    with card_cols[0]:
+                        st.markdown(f"""
+                        <div class="foodie-card gold-card">
+                            <div class="rank-badge">🥇 Rank 1</div>
+                            <h4 class="restaurant-title" title="{r1['Restaurant Name']}">{r1['Restaurant Name']}</h4>
+                            <div class="score-row">
+                                <span class="score-label">True Score</span>
+                                <span class="score-value">{r1['True Score']:.2f}</span>
+                            </div>
+                            <div class="score-row" style="margin-bottom: 10px;">
+                                <span class="score-label">Google Avg</span>
+                                <span class="score-value" style="font-size:1.05rem; font-weight:600; color:rgba(255,255,255,0.7);">{r1['Google Avg']:.2f}</span>
+                            </div>
+                            <span class="diff-badge {diff_class}">{diff_sign}{r1['Score Diff']:.2f} delta</span>
+                            <div class="card-footer">{int(r1['Reviews'])} reviews • {r1['Bot %']:.1f}% bot</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                # Rank 2: Silver
+                if len(results) >= 2:
+                    r2 = results.iloc[1]
+                    diff_class = "positive" if r2['Score Diff'] >= 0 else "negative"
+                    diff_sign = "+" if r2['Score Diff'] >= 0 else ""
+                    with card_cols[1]:
+                        st.markdown(f"""
+                        <div class="foodie-card silver-card">
+                            <div class="rank-badge">🥈 Rank 2</div>
+                            <h4 class="restaurant-title" title="{r2['Restaurant Name']}">{r2['Restaurant Name']}</h4>
+                            <div class="score-row">
+                                <span class="score-label">True Score</span>
+                                <span class="score-value">{r2['True Score']:.2f}</span>
+                            </div>
+                            <div class="score-row" style="margin-bottom: 10px;">
+                                <span class="score-label">Google Avg</span>
+                                <span class="score-value" style="font-size:1.05rem; font-weight:600; color:rgba(255,255,255,0.7);">{r2['Google Avg']:.2f}</span>
+                            </div>
+                            <span class="diff-badge {diff_class}">{diff_sign}{r2['Score Diff']:.2f} delta</span>
+                            <div class="card-footer">{int(r2['Reviews'])} reviews • {r2['Bot %']:.1f}% bot</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                # Rank 3: Bronze
+                if len(results) >= 3:
+                    r3 = results.iloc[2]
+                    diff_class = "positive" if r3['Score Diff'] >= 0 else "negative"
+                    diff_sign = "+" if r3['Score Diff'] >= 0 else ""
+                    with card_cols[2]:
+                        st.markdown(f"""
+                        <div class="foodie-card bronze-card">
+                            <div class="rank-badge">🥉 Rank 3</div>
+                            <h4 class="restaurant-title" title="{r3['Restaurant Name']}">{r3['Restaurant Name']}</h4>
+                            <div class="score-row">
+                                <span class="score-label">True Score</span>
+                                <span class="score-value">{r3['True Score']:.2f}</span>
+                            </div>
+                            <div class="score-row" style="margin-bottom: 10px;">
+                                <span class="score-label">Google Avg</span>
+                                <span class="score-value" style="font-size:1.05rem; font-weight:600; color:rgba(255,255,255,0.7);">{r3['Google Avg']:.2f}</span>
+                            </div>
+                            <span class="diff-badge {diff_class}">{diff_sign}{r3['Score Diff']:.2f} delta</span>
+                            <div class="card-footer">{int(r3['Reviews'])} reviews • {r3['Bot %']:.1f}% bot</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    with card_cols[2]:
+                        st.write("")
+                        
+                # Most Overrated
+                if len(results) >= 2:
+                    worst = results.sort_values('Score Diff').iloc[0]
+                    if worst['Score Diff'] < 0:
+                        with card_cols[3]:
+                            st.markdown(f"""
+                            <div class="foodie-card overrated-card">
+                                <div class="rank-badge">📉 Tourist Trap</div>
+                                <h4 class="restaurant-title" title="{worst['Restaurant Name']}">{worst['Restaurant Name']}</h4>
+                                <div class="score-row">
+                                    <span class="score-label">True Score</span>
+                                    <span class="score-value" style="color:#e74c3c;">{worst['True Score']:.2f}</span>
+                                </div>
+                                <div class="score-row" style="margin-bottom: 10px;">
+                                    <span class="score-label">Google Avg</span>
+                                    <span class="score-value" style="font-size:1.05rem; font-weight:600; color:rgba(255,255,255,0.7);">{worst['Google Avg']:.2f}</span>
+                                </div>
+                                <span class="diff-badge negative">{worst['Score Diff']:.2f} delta</span>
+                                <div class="card-footer">{int(worst['Reviews'])} reviews • {worst['Bot %']:.1f}% bot</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        with card_cols[3]:
+                            st.write("")
+                else:
+                    with card_cols[3]:
+                        st.write("")
+                        
+        # --- TAB: RATING INSIGHTS ---
+        with tab_insights:
+            if len(results) > 0:
+                st.subheader("📊 Interactive Rating Analysis")
+                st.markdown("This scatter plot compares the original **Google Average** with our recalculated **True Score**. Points above the diagonal dashed line represent **Hidden Gems** (places that are better than their Google average suggests), and points below represent **Tourist Traps / Overrated** places.")
+                
+                # Prepare data
+                plot_df = results.copy()
+                plot_df['Review Count'] = plot_df['Reviews']
+                
+                fig = px.scatter(
+                    plot_df,
+                    x="Google Avg",
+                    y="True Score",
+                    color="Score Diff",
+                    size="Review Count",
+                    hover_name="Restaurant Name",
+                    hover_data={
+                        "Google Avg": ":.2f",
+                        "True Score": ":.2f",
+                        "Score Diff": ":+.2f",
+                        "Bot %": ":.1f",
+                        "Review Count": True
+                    },
+                    color_continuous_scale=px.colors.diverging.RdYlGn,
+                    color_continuous_midpoint=0.0,
+                    labels={"Score Diff": "Score Delta"}
+                )
+                
+                # Draw diagonal line
+                min_val = min(plot_df['Google Avg'].min(), plot_df['True Score'].min()) - 0.2
+                max_val = max(plot_df['Google Avg'].max(), plot_df['True Score'].max()) + 0.2
+                fig.add_trace(go.Scatter(
+                    x=[min_val, max_val],
+                    y=[min_val, max_val],
+                    mode="lines",
+                    line=dict(color="rgba(255,255,255,0.3)", dash="dash"),
+                    name="Google Avg = True Score",
+                    showlegend=False
+                ))
+                
+                fig.update_layout(
+                    template="plotly_dark",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Google Average Rating", gridcolor="rgba(255,255,255,0.08)", range=[min_val, max_val]),
+                    yaxis=dict(title="TrueScore rating", gridcolor="rgba(255,255,255,0.08)", range=[min_val, max_val]),
+                    height=600
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
             
             def color_diff(val):
                 if pd.isna(val) or isinstance(val, str): return ''
