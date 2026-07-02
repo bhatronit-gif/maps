@@ -303,6 +303,16 @@ def calculate_true_scores(df, weights, apply_smoothing, bot_phrases_list):
     elif df['has_photo'].dtype == object:
         df['has_photo'] = df['has_photo'].astype(str).str.lower().isin(['true', 'yes', '1', 't'])
         
+    # Identify and clean category/type column for Cuisines
+    cat_cols = [c for c in df.columns if any(k in c for k in ['category', 'subcategories', 'type', 'cuisine', 'genre'])]
+    if cat_cols:
+        cat_series = df[cat_cols[0]].fillna("Unknown").astype(str).str.title()
+        for suffix in [" Restaurant", " Cafe", " Shop", " Bar", " Eatery", " Place", " Grill", " Bistro", " Buffet", " Diner", " Joint", " Pub"]:
+            cat_series = cat_series.str.replace(suffix, "", case=False, regex=False)
+        df['cuisine_category'] = cat_series.str.strip().replace("", "Unknown")
+    else:
+        df['cuisine_category'] = "Unknown"
+        
     if 'months_old' not in df.columns:
         date_cols = [c for c in df.columns if 'date' in c or 'time' in c]
         if date_cols:
@@ -375,7 +385,8 @@ def calculate_true_scores(df, weights, apply_smoothing, bot_phrases_list):
         total_reviews=('rating', 'count'),
         google_rating=('rating', 'mean'),
         bot_count=('is_bot', 'sum'),
-        one_star_count=('rating', lambda x: (x == 1).sum())
+        one_star_count=('rating', lambda x: (x == 1).sum()),
+        cuisine=('cuisine_category', 'first')
     ).reset_index()
     
     restaurants = restaurants[restaurants['total_weight'] > 0]
@@ -394,21 +405,22 @@ def calculate_true_scores(df, weights, apply_smoothing, bot_phrases_list):
     restaurants['penalty_applied'] = (restaurants['bot_ratio'] * weights['bot_penalty']) + (restaurants['one_star_ratio'] * weights['one_star'])
     restaurants['true_score'] = restaurants['true_score'] - restaurants['penalty_applied']
     
-    final = restaurants[[name_col, 'google_rating', 'true_score', 'total_reviews', 'bot_ratio', 'one_star_ratio']].copy()
+    final = restaurants[[name_col, 'google_rating', 'true_score', 'total_reviews', 'bot_ratio', 'one_star_ratio', 'cuisine']].copy()
     final.rename(columns={
         name_col: 'Restaurant Name', 
         'google_rating': 'Google Avg', 
         'true_score': 'True Score', 
         'total_reviews': 'Reviews',
         'bot_ratio': 'Bot %',
-        'one_star_ratio': '1-Star %'
+        'one_star_ratio': '1-Star %',
+        'cuisine': 'Cuisine'
     }, inplace=True)
     
     final['Score Diff'] = final['True Score'] - final['Google Avg']
     final['Bot %'] = final['Bot %'] * 100
     final['1-Star %'] = final['1-Star %'] * 100
     
-    final = final[['Restaurant Name', 'Google Avg', 'True Score', 'Score Diff', 'Bot %', '1-Star %', 'Reviews']]
+    final = final[['Restaurant Name', 'Google Avg', 'True Score', 'Score Diff', 'Bot %', '1-Star %', 'Reviews', 'Cuisine']]
     
     return final.sort_values('True Score', ascending=False), df, None
 
@@ -445,6 +457,9 @@ def generate_demo_data():
     gem_author_counts = np.random.choice([25, 80, 150], 50).tolist()
     gem_months = np.random.randint(1, 48, 50).tolist()
     
+    trap_types = ['Tourist Trap diner'] * 222
+    gem_types = ['French bistro'] * 50
+    
     return pd.DataFrame({
         'restaurant_name': trap_names + gem_names,
         'rating': trap_ratings + gem_ratings,
@@ -452,7 +467,8 @@ def generate_demo_data():
         'review_text': trap_texts + gem_texts,
         'has_photo': trap_photos + gem_photos,
         'author_reviews_count': trap_author_counts + gem_author_counts,
-        'months_old': trap_months + gem_months
+        'months_old': trap_months + gem_months,
+        'type': trap_types + gem_types
     })
 
 col1, col2 = st.columns([1, 1])
@@ -487,6 +503,22 @@ if df is not None:
     if error:
         st.error(error)
     else:
+        # --- SIDEBAR CUISINE FILTER ---
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🔍 Cuisine Filter")
+        if 'Cuisine' in results.columns:
+            unique_cuisines = sorted(results['Cuisine'].unique().tolist())
+            selected_cuisines = st.sidebar.multiselect(
+                "Cuisines to show:",
+                options=unique_cuisines,
+                default=None,
+                help="Select one or more cuisines to filter. Leave empty to show all."
+            )
+            
+            # Apply the filter if selections are made
+            if selected_cuisines:
+                results = results[results['Cuisine'].isin(selected_cuisines)]
+                raw_df = raw_df[raw_df['restaurant_name'].isin(results['Restaurant Name'])]
         # --- ANTI-FRAUD STATUS BREAKDOWN ---
         with st.expander("🔍 Anti-Fraud Flag Breakdown", expanded=False):
             total_revs = len(raw_df)
