@@ -304,7 +304,7 @@ def calculate_true_scores(df, weights, apply_smoothing, bot_phrases_list):
         df['has_photo'] = df['has_photo'].astype(str).str.lower().isin(['true', 'yes', '1', 't'])
         
     # Identify and clean category/type column for Cuisines
-    cat_cols = [c for c in df.columns if any(k in c for k in ['category', 'subcategories', 'type', 'cuisine', 'genre'])]
+    cat_cols = [c for c in df.columns if any(k in c for k in ['cat', 'type', 'cuisine', 'genre', 'tag', 'label', 'class', 'kind'])]
     if cat_cols:
         cat_series = df[cat_cols[0]].fillna("Unknown").astype(str).str.title()
         for suffix in [" Restaurant", " Cafe", " Shop", " Bar", " Eatery", " Place", " Grill", " Bistro", " Buffet", " Diner", " Joint", " Pub"]:
@@ -514,6 +514,14 @@ if df is not None:
                 default=None,
                 help="Select one or more cuisines to filter. Leave empty to show all."
             )
+            
+            # If all cuisines are "Unknown", display an info tip about columns checked
+            if len(unique_cuisines) == 1 and unique_cuisines[0] == "Unknown":
+                st.sidebar.info(
+                    "💡 **Tip:** Cuisine categories show up as 'Unknown' because we couldn't detect a category column in your CSV. "
+                    "We check for columns containing `cat`, `type`, `cuisine`, `tag`, etc. "
+                    f"Your CSV headers: `{', '.join(df.columns[:8])}`"
+                )
             
             # Apply the filter if selections are made
             if selected_cuisines:
